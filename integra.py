@@ -22,11 +22,15 @@ if modo_cliente == "Cadastrar Novo":
     novo_nome = st.sidebar.text_input("Nome da Empresa")
     novo_cod = st.sidebar.text_input("Código Domínio")
     novo_conta = st.sidebar.text_input("Conta Banco (Reduzida)")
-    novo_parser = st.sidebar.selectbox("Layout do Banco", list(parsers.AVAILABLE_PARSERS.keys()))
+    novos_parsers = st.sidebar.multiselect(
+        "Modelos de Banco", 
+        list(parsers.AVAILABLE_PARSERS.keys()),
+        default=["Bradesco (PDF)"]
+    )
     
     if st.sidebar.button("Salvar Cliente"):
-        if novo_nome and novo_cod and novo_conta:
-            if database.criar_cliente(novo_nome, novo_cod, novo_conta, novo_parser):
+        if novo_nome and novo_cod and novo_conta and novos_parsers:
+            if database.criar_cliente(novo_nome, novo_cod, novo_conta, novos_parsers):
                 st.sidebar.success("Cliente criado!")
                 st.rerun()
             else:
@@ -40,29 +44,47 @@ else:
         st.sidebar.warning("Nenhum cliente cadastrado.")
     else:
         # Cria dicionário {nome: id} para o selectbox
-        # clientes agora retorna (id, nome, codigo, conta, parser)
-        # Atenção: listar_clientes no database.py retorna: id, nome, codigo_sistema, conta_banco_padrao, banco_parser
         opcoes = {f"{c[1]} (Cód: {c[2]})": c[0] for c in clientes}
         nome_selecionado = st.sidebar.selectbox("Selecione a Empresa", list(opcoes.keys()))
         cliente_id = opcoes[nome_selecionado]
         
         # Carrega dados do cliente
-        cliente_dados = database.get_cliente_by_id(cliente_id) # (id, nome, cnpj, cod, conta, parser)
-        # O fetchall do database.py retorna * então a ordem depende do CREATE TABLE + ALTER TABLE
-        # CREATE: id, nome, cnpj, codigo_sistema, conta_banco_padrao
-        # ALTER ADD: banco_parser
-        # Logo: 0:id, 1:nome, 2:cnpj, 3:codigo, 4:conta, 5:parser
+        cliente_dados = database.get_cliente_by_id(cliente_id)
         
         if cliente_dados:
+            bancos_parsers = database.get_bancos_parsers(cliente_id)
             cliente_selecionado = {
-                "id": cliente_dados[0],
+                "id": cliente_id,
                 "nome": cliente_dados[1],
                 "codigo": cliente_dados[3],
                 "conta_banco": cliente_dados[4],
-                "parser": cliente_dados[5] if len(cliente_dados) > 5 else "Bradesco (PDF)"
+                "parsers": bancos_parsers
             }
-            st.sidebar.info(f"Banco: {cliente_selecionado['parser']}")
+            st.sidebar.info(f"Bancos: {', '.join(cliente_selecionado['parsers'])}")
             st.sidebar.info(f"Conta: {cliente_selecionado['conta_banco']}")
+            
+            # --- Gerenciar Parsers do Cliente ---
+            with st.sidebar.expander("📋 Gerenciar Bancos"):
+                st.markdown("**Parsers Atuais:**")
+                for parser in cliente_selecionado['parsers']:
+                    col1, col2 = st.columns([3, 1])
+                    col1.write(f"✓ {parser}")
+                    if col2.button("❌", key=f"remove_{parser}_{cliente_id}"):
+                        database.remover_parser(cliente_id, parser)
+                        st.success(f"Parser removido!")
+                        st.rerun()
+                
+                st.markdown("**Adicionar novo:**")
+                novos = st.multiselect(
+                    "Selecione parsers para adicionar",
+                    [p for p in parsers.AVAILABLE_PARSERS.keys() if p not in cliente_selecionado['parsers']],
+                    key=f"add_parser_{cliente_id}"
+                )
+                if st.button("✅ Adicionar", key=f"add_btn_{cliente_id}"):
+                    for parser in novos:
+                        database.adicionar_parser(cliente_id, parser)
+                    st.success("Parsers adicionados!")
+                    st.rerun()
 
 
 debug_mode = st.sidebar.checkbox("🔎 Debug (mostrar detalhes)", value=False)
@@ -73,11 +95,15 @@ if cliente_selecionado:
     # Carrega regras do banco
     regras = database.listar_regras(cliente_selecionado["id"])
     
-    # Identifica o parser correto
-    parser_name = cliente_selecionado.get("parser", "Bradesco (PDF)")
-    parser_module = parsers.get_parser(parser_name)
+    # Seleção do parser para upload
+    parser_selecionado = st.selectbox(
+        "Selecione o modelo de banco para upload",
+        cliente_selecionado['parsers']
+    )
     
-    upload = st.file_uploader(f"Selecione o arquivo ({parser_name})", type="pdf") # Futuro: aceitar OFX/XLSX dependendo do parser
+    parser_module = parsers.get_parser(parser_selecionado)
+    
+    upload = st.file_uploader(f"Selecione o arquivo ({parser_selecionado})", type="pdf")
 
     if upload:
         if parser_module:
@@ -87,7 +113,7 @@ if cliente_selecionado:
                 st.error(f"Erro ao processar arquivo: {e}")
                 df = pd.DataFrame()
         else:
-            st.error(f"Parser '{parser_name}' não encontrado.")
+            st.error(f"Parser '{parser_selecionado}' não encontrado.")
             df = pd.DataFrame()
 
         if not df.empty:
@@ -97,7 +123,8 @@ if cliente_selecionado:
             if "Valor" in df_view.columns:
                 df_view["Valor"] = df_view["Valor"].apply(lambda x: f"R$ {x:,.2f}" if isinstance(x, (int, float)) else x)
             
-            cols_to_show = [c for c in ["Nº", "Data", "Lancamento", "Dcto", "Valor"] if c in df_view.columns]
+            # Colunas a exibir (na ordem): mostrar as que existem no dataframe
+            cols_to_show = [c for c in ["Nº", "Data", "Lancamento", "Historico", "Dcto", "Valor"] if c in df_view.columns]
             st.dataframe(df_view[cols_to_show], use_container_width=True, hide_index=True)
 
             st.subheader("🧠 Mapeamento Contábil")
